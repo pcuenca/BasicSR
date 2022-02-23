@@ -105,6 +105,8 @@ def print_xla_device_info(opt):
 def _mp_train_pipeline(root_path):
     # parse options, set distributed setting, set ramdom seed
     opt, args = parse_options(root_path, is_train=True)
+    opt['root_path'] = root_path
+
     print_xla_device_info(opt)
 
     # load resume states if necessary
