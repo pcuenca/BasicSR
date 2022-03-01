@@ -12,7 +12,7 @@ from basicsr.models import build_model
 from basicsr.utils import (AvgTimer, MessageLogger, check_resume, get_env_info, get_root_logger, get_time_str,
                            init_tb_logger, wandb_enabled, init_wandb_logger, log_artifact, make_exp_dirs, mkdir_and_rename, scandir)
 from basicsr.utils.options import copy_opt_file, dict2str, parse_options
-from basicsr.utils.accelerator_util import accelerator_name
+from basicsr.utils.accelerator_util import accelerator_name, default_device
 
 def init_tb_loggers(opt):
     # initialize wandb logger before tensorboard logger to allow proper sync
@@ -81,8 +81,8 @@ def load_resume_state(opt):
     if resume_state_path is None:
         resume_state = None
     else:
-        device_id = torch.cuda.current_device()
-        resume_state = torch.load(resume_state_path, map_location=lambda storage, loc: storage.cuda(device_id))
+        device = default_device(opt)
+        resume_state = torch.load(resume_state_path, map_location=device)
         check_resume(opt, resume_state['iter'])
     return resume_state
 
