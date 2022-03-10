@@ -10,7 +10,6 @@ from basicsr.utils import get_root_logger, imwrite, tensor2img
 from basicsr.utils.registry import MODEL_REGISTRY
 from .base_model import BaseModel
 
-
 @MODEL_REGISTRY.register()
 class SRModel(BaseModel):
     """Base SR model for single image super-resolution."""
@@ -20,7 +19,8 @@ class SRModel(BaseModel):
 
         # define network
         self.net_g = build_network(opt['network_g'])
-        self.net_g = self.model_to_device(self.net_g)
+        self.net_g = self.model_to_device(self.net_g, wrap_dist = False)
+
         self.print_network(self.net_g)
 
         # load pretrained models
@@ -31,6 +31,7 @@ class SRModel(BaseModel):
 
         if self.is_train:
             self.init_training_settings()
+        self.net_g = self.to_distributed(self.net_g)
 
     def init_training_settings(self):
         self.net_g.train()
@@ -70,6 +71,9 @@ class SRModel(BaseModel):
         self.setup_optimizers()
         self.setup_schedulers()
 
+        # Initialize amp when models and optimizers are ready
+        self.ampify()
+
     def setup_optimizers(self):
         train_opt = self.opt['train']
         optim_params = []
@@ -84,6 +88,22 @@ class SRModel(BaseModel):
         self.optimizer_g = self.get_optimizer(optim_type, optim_params, **train_opt['optim_g'])
         self.optimizers.append(self.optimizer_g)
 
+    def amp_models(self):
+        """
+        Return a list of modules suitable for AMP, so their inputs are automatically
+        cast to the appropriate type.
+        """
+        return {"net_g": self.net_g}
+
+    def ampify(self):
+        if not self.use_amp:
+            return
+        models_dict = self.amp_models()
+        model_names, models = list(zip(*models_dict.items()))
+        models, self.optimizers = self.to_amp(list(models), self.optimizers)
+        for name, model in zip(model_names, models):
+            setattr(self, name, model)
+
     def feed_data(self, data):
         self.lq = data['lq'].to(self.device)
         if 'gt' in data:
@@ -92,7 +112,17 @@ class SRModel(BaseModel):
     def optimize_parameters(self, current_iter):
         self.optimizer_g.zero_grad()
         self.output = self.net_g(self.lq)
+        l_total, loss_dict = self.compute_loss()
 
+        self.backward(l_total, self.optimizer_g)
+        self.optimizer_step(self.optimizer_g)
+
+        self.log_dict = self.reduce_loss_dict(loss_dict)
+
+        if self.ema_decay > 0:
+            self.model_ema(decay=self.ema_decay)
+
+    def compute_loss(self):
         l_total = 0
         loss_dict = OrderedDict()
         # pixel loss
@@ -109,14 +139,7 @@ class SRModel(BaseModel):
             if l_style is not None:
                 l_total += l_style
                 loss_dict['l_style'] = l_style
-
-        l_total.backward()
-        self.optimizer_step(self.optimizer_g)
-
-        self.log_dict = self.reduce_loss_dict(loss_dict)
-
-        if self.ema_decay > 0:
-            self.model_ema(decay=self.ema_decay)
+        return l_total, loss_dict
 
     def test(self):
         if hasattr(self, 'net_g_ema'):

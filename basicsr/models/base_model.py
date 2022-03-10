@@ -3,6 +3,7 @@ import time
 import torch
 from collections import OrderedDict
 from copy import deepcopy
+# from torch._C import Module
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
 from basicsr.models import lr_scheduler as lr_scheduler
@@ -14,6 +15,12 @@ try:
     import torch_xla.core.xla_model as xm
 except:
     pass
+
+try:
+    from apex import amp
+    AMP_AVAILABLE = True
+except ModuleNotFoundError:
+    AMP_AVAILABLE = False
 
 class BaseModel():
     """Base model."""
@@ -28,6 +35,10 @@ class BaseModel():
     @property
     def accelerator(self):
         return accelerator_util.accelerator_name(self.opt)
+
+    @property
+    def use_amp(self):
+        return AMP_AVAILABLE and self.opt['train'].get('amp', False)
 
     def feed_data(self, data):
         pass
@@ -93,8 +104,8 @@ class BaseModel():
     def get_current_log(self):
         return self.log_dict
 
-    def model_to_device(self, net):
-        """Model to device. It also wraps models with DistributedDataParallel
+    def model_to_device(self, net, wrap_dist=True):
+        """Model to device. It optionally wraps models with DistributedDataParallel
         or DataParallel.
 
         Args:
@@ -102,6 +113,27 @@ class BaseModel():
         """
         net = net.to(self.device)
 
+        if wrap_dist:
+            net = self.to_distributed(net)
+
+        return net
+
+    def to_amp(self, models, optimizers):
+        """
+        **Note**: the call to amp.initialize must be done only once. If we need
+        to make multiple models compatible with amp (i.e. in a GAN setting),
+        we should do it _after_ models have been moved to CUDA devices, but
+        _before_ wrapping them with DistributedDataParallel. That's the reason
+        for breaking up model_to_device() and to_distributed().
+        """
+        if self.use_amp:
+            from apex import amp
+            opt_level = self.opt['train'].get('opt_level', 'O1')
+            print(f"Using apex.amp with opt_level {opt_level}")
+            return amp.initialize(models, optimizers, opt_level=opt_level)
+
+    def to_distributed(self, net):
+        """See notes above. This must happen after amp initialization."""
         if self.accelerator == 'xla':
             # No need to use DataParallel or DistributedDataParallel with xmp
             return net
@@ -116,7 +148,12 @@ class BaseModel():
 
     def get_optimizer(self, optim_type, params, lr, **kwargs):
         if optim_type == 'Adam':
-            optimizer = torch.optim.Adam(params, lr, **kwargs)
+            if self.use_amp:
+                # Drop-in replacement for Adam or AdamW
+                from apex.optimizers import FusedAdam
+                optimizer = FusedAdam(params, lr, adam_w_mode=False, **kwargs)
+            else:
+                optimizer = torch.optim.Adam(params, lr, **kwargs)
         else:
             raise NotImplementedError(f'optimizer {optim_type} is not supperted yet.')
         return optimizer
@@ -127,6 +164,13 @@ class BaseModel():
             xm.mark_step()
         else:
             optimizer.step()
+
+    def backward(self, loss, optimizer):
+        if self.use_amp:
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+        else:
+            loss.backward()
 
     def setup_schedulers(self):
         """Set up schedulers."""

@@ -10,6 +10,16 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+# AMP support
+try:
+    from apex import amp
+
+    # Disambiguate tensordot so inputs to RGB2YCbCrJpeg.forward() are automatically casted.
+    # It works with 'float' or 'half', conservatively keeping float for safety.
+    amp.register_float_function(torch, 'tensordot')
+except ModuleNotFoundError:
+    pass
+
 # ------------------------ utils ------------------------#
 y_table = np.array(
     [[16, 11, 10, 16, 24, 40, 51, 61], [12, 12, 14, 19, 26, 58, 60, 55], [14, 13, 16, 24, 40, 57, 69, 56],
